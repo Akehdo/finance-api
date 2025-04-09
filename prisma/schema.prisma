@@ -1,0 +1,50 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          Int       @id @default(autoincrement())
+  email       String    @unique
+  password    String    
+  name        String 
+  balance     Int       @default(0)
+  createdAt   DateTime  @default(now()) @map("created_at") 
+  updatedAt   DateTime  @updatedAt      @map("updated_at") 
+
+  @@map("user")
+
+  RefreshTokens RefreshToken[] 
+  Transactions  Transaction[]
+}
+
+model RefreshToken {
+  id          Int         @id @default(autoincrement())
+  token       String
+  userAgent   String
+  createdAt   DateTime  @default(now()) @map("created_at") 
+  updatedAt   DateTime  @updatedAt      @map("updated_at")
+
+  userId      Int
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)      
+  @@map("refresh_token")
+}
+
+model Transaction {
+  id          Int      @id @default(autoincrement())
+  amount      Int
+  type        String   //income or expense
+  category    String   // salary, food, entertainment, etc.
+  description String?
+  createdAt   DateTime  @default(now()) @map("created_at") 
+  updatedAt   DateTime  @updatedAt      @map("updated_at")
+
+  userId      Int
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("transaction")
+}
