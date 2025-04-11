@@ -18,6 +18,7 @@ export class AuthService {
 
     async register(dto: RegisterDto, userAgent: string) {
         const existingUser = await this.userService.findByEmail(dto.email);
+        
         if(existingUser) {
             throw new BadRequestException("Пользователь с таким email уже существует");
         }
@@ -99,7 +100,7 @@ export class AuthService {
                 userAgent,
              },
         });
-        
+
         return { message: 'Logged out successfully' };
     }
 

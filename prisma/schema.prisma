@@ -23,7 +23,7 @@ model User {
 }
 
 model RefreshToken {
-  id          Int         @id @default(autoincrement())
+  id          Int       @id           @default(autoincrement())
   token       String
   userAgent   String
   createdAt   DateTime  @default(now()) @map("created_at") 
@@ -35,7 +35,7 @@ model RefreshToken {
 }
 
 model Transaction {
-  id          Int      @id @default(autoincrement())
+  id          Int      @id              @default(autoincrement())
   amount      Int
   type        String   //income or expense
   category    String   // salary, food, entertainment, etc.
