@@ -31,10 +31,9 @@ export class AuthService {
             password: hashedPassword,
         });
 
-        const tokens = await this.generateTokens(user.id, user.email);
-        await this.saveRefreshToken(user.id, tokens.refresh_token, userAgent);
+        return await this.generateAndSaveTokens(user.id, user.email, userAgent);
 
-        return tokens;
+
     }
 
     async login(dto: LoginDto, userAgent: string){
@@ -47,11 +46,10 @@ export class AuthService {
         if(!isMatch){
             throw new UnauthorizedException('Неверные учетные данные');
         }
+        
 
-        const tokens = await this.generateTokens(user.id, user.email);
-        await this.saveRefreshToken(user.id, user.email, userAgent);
+        return await this.generateAndSaveTokens(user.id, user.email, userAgent);
 
-        return tokens;
     }
 
     async refresh(dto: RefreshDto, userAgent: string){
@@ -87,10 +85,9 @@ export class AuthService {
              },
         });
 
-        const tokens = await this.generateTokens(user.id, user.email);
-        await this.saveRefreshToken(user.id, user.email, userAgent);
+        return await this.generateAndSaveTokens(user.id, user.email, userAgent);
 
-        return tokens;
+
     }
 
     async logout(dto: LogoutDto, userAgent: string){
@@ -105,10 +102,17 @@ export class AuthService {
     }
 
 
-    private async generateTokens(userId: number, email: string) {
+    private async generateAndSaveTokens(userId: number, email: string, userAgent: string) {
         const payload = { sub: userId, email };
-
-        const [acces_token, refresh_token] = await Promise.all([
+    
+        await this.prisma.refreshToken.deleteMany({
+            where: {
+                userId,
+                userAgent,
+            },
+        });
+    
+        const [accessToken, refreshToken] = await Promise.all([
             this.jwtService.signAsync(payload, {
                 secret: process.env.JWT_SECRET,
                 expiresIn: process.env.JWT_EXPIRES_IN,
@@ -118,20 +122,20 @@ export class AuthService {
                 expiresIn: process.env.JWT_REFRESH_EXPIRES_IN,
             }),
         ]);
-        return {
-            acces_token, refresh_token
-        };
-    }
-
-    private async saveRefreshToken(userId: number, token: string, userAgent: string) {
+    
         await this.prisma.refreshToken.create({
             data: {
-                token,
+                token: refreshToken,
                 userAgent,
                 userId,
             },
         });
+    
+        return {
+            accessToken,
+            refreshToken,
+        };
     }
-
+    
 
 }

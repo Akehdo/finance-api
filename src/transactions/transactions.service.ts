@@ -1,29 +1,54 @@
-import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import { PrismaService } from 'src/shared/prisma/prisma.service';
-import { UserService } from 'src/user/user.service';
 import { CreateTransactionDto } from './dtos/create-transaction.dto';
 import { Prisma, Transaction } from '@prisma/client';
 import { UpdateTransactionDto } from './dtos/update-transactions.dto';
 import { FilterTransactionDto } from './dtos/filter-transaction.dto';
+import { TransactionGateway } from './transactions.gateway';
+import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
+import { InjectQueue } from '@nestjs/bull';
+import { Queue } from 'bull';
 
 @Injectable()
 export class TransactionsService {
     constructor(
-        private prisma: PrismaService,
+        @Inject(CACHE_MANAGER) private cacheManager: Cache,
+        private readonly prisma: PrismaService,
+        private readonly gateway: TransactionGateway,  
+        @InjectQueue('balance') private balanceQueue: Queue,
     ) {}
 
-    async findAllByUser(userId: number): Promise<Transaction[]>{
-        return this.prisma.transaction.findMany({where : { userId }});
+    async findAllByUser(userId: number, query: { page?: number, limit?: number } ): Promise<Transaction[]>{
+        
+        const page = query.page || 1;
+        const limit = query.limit || 2;
+        const offset = (page - 1) * limit;
+
+        const cacheKey = `transactions: ${userId}: page=${page}&limit=${limit}`;
+
+        const cached = await this.cacheManager.get<Transaction[]>(cacheKey);
+        if(cached){
+            console.log('return from cache');
+            return cached;
+        }   
+
+        const transactions = await this.prisma.transaction.findMany({ 
+            where : { userId }, 
+            orderBy: { createdAt: "desc" },
+            skip: offset,
+            take: limit,
+        });
+        
+
+        await this.cacheManager.set(cacheKey, transactions, 30_000);
+
+        return transactions;
     }
 
     async findOne(id: number, userId: number): Promise<Transaction> {
-        const transaction = await this.prisma.transaction.findUnique({ where: {id} });
+        const transaction = await this.prisma.transaction.findUnique({ where: { id, userId } });
         if(!transaction){
             throw new BadRequestException(" Транзакции не существует.");
-        }
-
-        if(transaction.userId != userId){
-            throw new ForbiddenException("Вы не можете просматривать чужие транзакциии");
         }
 
         return transaction;
@@ -42,84 +67,40 @@ export class TransactionsService {
             },
         });
 
-        const change = dto.type === 'income' ? dto.amount: -dto.amount;
+        await this.balanceQueue.add('recalculate', { userId });
 
-        await this.prisma.user.update({
-            where: {id: userId},
-            data: {
-                balance: { increment: change },
-            },
-        });
+        this.gateway.sendTransactionEvent("transaction created", transaction);
 
         return transaction;
     }
 
     async remove(id: number, userId: number): Promise<Transaction | null> {
-        const transaction = await this.prisma.transaction.findUnique({ where: {id} });
+        const transaction = await this.prisma.transaction.findFirst({ where: { id, userId } });
 
         if(!transaction){
             throw new BadRequestException("Такой транзакции не существует")
-        }
-
-        if(transaction.userId != userId){
-            throw new ForbiddenException("Вы не можете удалить чужую транзакцию");
         }
 
         await this.prisma.transaction.delete({
            where: { id }
         });
 
-        const change = transaction.type === 'income' ? -transaction.amount : transaction.amount;
+        await this.balanceQueue.add('recalculate', { userId });
 
-        await this.prisma.user.update({
-            where: {id: userId},
-            data: {
-                balance: { increment: change } ,
-            },
-        });
+
+        this.gateway.sendTransactionEvent("transaction removed", transaction);
 
         return transaction;
     }
 
     async update(id: number, dto: UpdateTransactionDto, userId: number): Promise<Transaction> {
-        const transaction = await this.prisma.transaction.findUnique({ where: { id } });
+        const transaction = await this.prisma.transaction.findUnique({ where: { id, userId } });
       
         if (!transaction) {
           throw new BadRequestException('Такой транзакции не существует');
         }
-      
-        if (transaction.userId !== userId) {
-          throw new ForbiddenException('Вы не можете обновлять чужие транзакции');
-        }
-      
-        const oldAmount = transaction.amount;
-        const oldType = transaction.type;
-      
-        const newAmount = dto.amount ?? transaction.amount;
-        const newType = dto.type ?? transaction.type;
-      
-        let change = 0;
-      
-        if (oldType === newType) {
-          change = newType === 'income'
-            ? newAmount - oldAmount //true
-            : oldAmount - newAmount; //false
-        } else {
-          change = newType === 'income'
-            ? oldAmount + newAmount //true
-            : -(oldAmount + newAmount); //false
-        }
-      
-        await this.prisma.user.update({
-          where: { id: userId },
-          data: {
-            balance: {
-              increment: change,
-            },
-          },
-        });
-      
-        const updated = await this.prisma.transaction.update({
+            
+        const updatedTransaction = await this.prisma.transaction.update({
           where: { id },
           data: {
             amount: dto.amount,
@@ -129,33 +110,30 @@ export class TransactionsService {
           },
         });
       
-        return updated;
+        await this.balanceQueue.add('recalculate', { userId });
+        
+        this.gateway.sendTransactionEvent('transaction updated', updatedTransaction);
+      
+        return updatedTransaction;
       }
       
-    async getSummary(userId: number) : Promise<{
-        income: number,
-        expense: number,
-        balance: number,
-    }> {
-        const resultIncome = await this.prisma.transaction.aggregate({
+      
+    async getSummary(userId: number) {
+        const groups = await this.prisma.transaction.groupBy({
+            by: ['type'],
             _sum: { amount: true },
-            where: { userId, type: 'income' },
+            where: { userId },
         });
 
-        const resultExpense = await this.prisma.transaction.aggregate({
-            _sum: { amount: true },
-            where: { userId, type: 'expense' },
-        });
+        let income = 0;
+        let expense = 0;
 
-        const income = resultIncome._sum.amount ?? 0;
-        const expense = resultExpense._sum.amount ?? 0;
-        const balance = income - expense;
+        for(const g of groups) {
+            if(g.type === 'income') income = g._sum.amount ?? 0;
+            if(g.type === 'expense') expense = g._sum.amount ?? 0;
+        }
 
-        return { 
-            income,
-            expense,
-            balance,
-        };
+        return { income, expense, balance: income - expense};
     }
 
     async filterByType(type: string):Promise<Transaction[]> { 
@@ -199,4 +177,20 @@ export class TransactionsService {
 
         return await this.prisma.transaction.findMany( { where } );
     }
+   
+
+    async recalculateUserBalance(userId: number): Promise<void> {
+        const transaction = await this.prisma.transaction.findMany({ where: { userId} });
+
+        const newBalance = transaction.reduce((acc, t ) => {
+            return t.type === 'income' ? acc + t.amount : acc - t.amount;
+        }, 0);
+
+        await this.prisma.user.update({
+            where: { id: userId },
+            data: { balance: newBalance },
+          });
+    }
+      
+      
 }
